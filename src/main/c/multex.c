@@ -220,16 +220,12 @@ struct rcontext {
 };
 
 static
-ssize_t create_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, const char* newkey, char* obuf) {
+ssize_t create_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, struct cipher_context* oldkey, const char* newkey, char* obuf) {
     char* p = obuf;
     struct session* session;
-    struct cipher_context* oldkey = config->key0;
 
-    session = session_find_by_address(config, local, remote);
-    if (session) {
-        if (session->key1) {
-            oldkey = session->key1;
-        }
+    if (oldkey == 0) {
+        oldkey = config->key0;
     }
 
     memcpy(p, newkey, config->cipher_keysize);
@@ -259,15 +255,15 @@ ssize_t create_challenge(struct master_config* config, struct udpaddress* remote
 }
 
 static
-ssize_t encrypt_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, const char* newkey, char* obuf) {
+ssize_t encrypt_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, struct cipher_context* oldkey, const char* newkey, char* obuf) {
     char token[1500];
     size_t tlength;
 
-    tlength = create_challenge(config, remote, local, newkey, token);
+    tlength = create_challenge(config, remote, local, oldkey, newkey, token);
     return xencrypt(config, config->keyX, token, tlength, obuf);
 }
 
-struct cipher_context* verify_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, char* in, ssize_t ilength) {
+struct cipher_context* verify_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, struct cipher_context* oldkey, char* in, ssize_t ilength) {
     char obuf[1500];
     char token[1500];
     ssize_t tlength, olength;
@@ -276,7 +272,7 @@ struct cipher_context* verify_challenge(struct master_config* config, struct udp
     if (olength < 0) {
         return 0;
     }
-    tlength = create_challenge(config, remote, local, obuf, token);
+    tlength = create_challenge(config, remote, local, oldkey, obuf, token);
     if (tlength != olength) {
         return 0;
     }
@@ -319,7 +315,7 @@ void write_offer(struct master_config* config, struct endpoint* endpoint, struct
         }
     }
 
-    tlength = encrypt_challenge(config, remote, &endpoint->local, key, token);
+    tlength = encrypt_challenge(config, remote, &endpoint->local, session ? session->key1 : 0, key, token);
 
     memset(&proto, 0, sizeof(proto));
     proto.type = PROTO_OFFER;
@@ -343,7 +339,7 @@ void write_challenge(struct rcontext* rcontext, const char* key) {
 
     memset(&proto, 0, sizeof(proto));
 
-    tlength = encrypt_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, key, token);
+    tlength = encrypt_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, rcontext->session ? rcontext->session->rkey : 0, key, token);
     proto.type = PROTO_CHALLENGE;
     proto.id.value = token;
     proto.id.length = tlength;
@@ -411,7 +407,7 @@ static
 void read_challenge(struct rcontext* rcontext, const struct proto* proto) {
     struct cipher_context* key2;
 
-    key2 = verify_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, proto->rid.value, proto->rid.length);
+    key2 = verify_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, rcontext->session ? rcontext->session->key1 : 0, proto->rid.value, proto->rid.length);
     if (key2) {
         if (rcontext->rendpoint == 0) {
             rcontext->rendpoint = rendpoint_update(rcontext->config, &rcontext->from, 0);
@@ -436,7 +432,7 @@ void read_confirm(struct rcontext* rcontext, const struct proto* proto) {
     if (olength < 0) {
         return;
     }
-    cipher = verify_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, proto->rid.value, proto->rid.length);
+    cipher = verify_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, rcontext->session ? rcontext->session->rkey : 0, proto->rid.value, proto->rid.length);
     if (cipher == 0) {
         fprintf(stderr, "!! verify_challenge failed\n");
         return;
