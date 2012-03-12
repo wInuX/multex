@@ -220,11 +220,21 @@ struct rcontext {
 };
 
 static
-ssize_t create_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, const char* newkey, const char* oldkey, char* obuf) {
+ssize_t create_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, const char* newkey, char* obuf) {
     char* p = obuf;
+    struct session* session;
+    struct cipher_context* oldkey = config->key0;
+
+    session = session_find_by_address(config, local, remote);
+    if (session) {
+        if (session->key1) {
+            oldkey = session->key1;
+        }
+    }
+
     memcpy(p, newkey, config->cipher_keysize);
     p += config->cipher_keysize;
-    memcpy(p, oldkey, config->cipher_keysize);
+    memcpy(p, cipher_context_getkey(oldkey), config->cipher_keysize);
     p += config->cipher_keysize;
     if (remote->ip.family == AF_INET) {
         *p++ = 0;
@@ -249,11 +259,11 @@ ssize_t create_challenge(struct master_config* config, struct udpaddress* remote
 }
 
 static
-ssize_t encrypt_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, const char* newkey, const char* oldkey, char* obuf) {
+ssize_t encrypt_challenge(struct master_config* config, struct udpaddress* remote, struct udpaddress* local, const char* newkey, char* obuf) {
     char token[1500];
     size_t tlength;
 
-    tlength = create_challenge(config, remote, local, newkey, oldkey, token);
+    tlength = create_challenge(config, remote, local, newkey, token);
     return xencrypt(config, config->keyX, token, tlength, obuf);
 }
 
@@ -261,22 +271,12 @@ struct cipher_context* verify_challenge(struct master_config* config, struct udp
     char obuf[1500];
     char token[1500];
     ssize_t tlength, olength;
-    struct session* session;
-    struct cipher_context* oldkey = config->key0;
-
-    session = session_find_by_address(config, local, remote);
-    if (session) {
-        if (session->key1) {
-            oldkey = session->key1;
-        }
-    }
 
     olength = xdecrypt(config, config->keyX, in, ilength, obuf);
     if (olength < 0) {
         return 0;
     }
-    tlength = create_challenge(config, remote, local, obuf, cipher_context_getkey(oldkey), token);
-
+    tlength = create_challenge(config, remote, local, obuf, token);
     if (tlength != olength) {
         return 0;
     }
@@ -307,23 +307,19 @@ void write_offer(struct master_config* config, struct endpoint* endpoint, struct
     ssize_t tlength, olength, r;
     struct proto proto;
     struct session* session;
-    struct cipher_context* oldkey = config->key0, *rkey = config->key0;
+    struct cipher_context* rkey = config->key0;
 
     key = alloca(config->cipher_keysize);
     random_bytes(key, config->cipher_keysize);
 
-
     session = session_find_by_address(config, &endpoint->local, remote);
     if (session) {
-        if (session->key1) {
-            oldkey = session->key1;
-        }
         if (session->rkey) {
             rkey = session->rkey;
         }
     }
 
-    tlength = encrypt_challenge(config, remote, &endpoint->local, key, cipher_context_getkey(oldkey), token);
+    tlength = encrypt_challenge(config, remote, &endpoint->local, key, token);
 
     memset(&proto, 0, sizeof(proto));
     proto.type = PROTO_OFFER;
@@ -347,7 +343,7 @@ void write_challenge(struct rcontext* rcontext, const char* key) {
 
     memset(&proto, 0, sizeof(proto));
 
-    tlength = encrypt_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, key, cipher_context_getkey(rcontext->rkey), token);
+    tlength = encrypt_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, key, token);
     proto.type = PROTO_CHALLENGE;
     proto.id.value = token;
     proto.id.length = tlength;
@@ -360,6 +356,46 @@ void write_challenge(struct rcontext* rcontext, const char* key) {
 }
 
 static
+void write_confirm(struct rcontext* rcontext, const char* token, ssize_t tlength) {
+    char obuf[1500];
+    ssize_t olength;
+    struct proto proto;
+
+    memset(&proto, 0, sizeof(proto));
+
+    proto.type = PROTO_CONFIRM;
+    if (rcontext->proto.id.length) {
+        proto.rid.value = rcontext->proto.id.value;
+        proto.rid.length = rcontext->proto.id.length;
+    }
+
+    proto.parameters.priority = rcontext->endpoint->interface->priority;
+    proto.parameters.weight = rcontext->endpoint->interface->weight;
+
+    olength = proto_encode(&proto, obuf, sizeof(obuf));
+
+    encrypt_and_write(rcontext->config, rcontext->endpoint->socket, &rcontext->from, rcontext->rkey, obuf, olength);
+}
+
+static
+void write_accept(struct rcontext* rcontext) {
+    char obuf[1500];
+    ssize_t olength;
+    struct proto proto;
+
+    memset(&proto, 0, sizeof(proto));
+
+    proto.type = PROTO_ACCEPTED;
+    if (rcontext->proto.id.length) {
+        proto.rid.value = rcontext->proto.id.value;
+        proto.rid.length = rcontext->proto.id.length;
+    }
+    olength = proto_encode(&proto, obuf, sizeof(obuf));
+
+    encrypt_and_write(rcontext->config, rcontext->endpoint->socket, &rcontext->from, rcontext->session->rkey, obuf, olength);
+}
+
+static
 void read_offer(struct rcontext* rcontext, const struct proto* proto) {
     char obuf[1500], token[1600], sbuf[1700];
     char* p = obuf;
@@ -369,26 +405,6 @@ void read_offer(struct rcontext* rcontext, const struct proto* proto) {
         return;
     }
     write_challenge(rcontext, proto->key.value);
-}
-
-static
-void write_confirm(struct rcontext* rcontext, const char* token, ssize_t tlength) {
-    char obuf[1500];
-    ssize_t olength;
-    struct proto proto;
-
-    memset(&proto, 0, sizeof(proto));
-
-    proto.type = PROTO_CONFIRM;
-    proto.rid.value = rcontext->proto.id.value;
-    proto.rid.length = rcontext->proto.id.length;
-
-    proto.parameters.priority = rcontext->endpoint->interface->priority;
-    proto.parameters.weight = rcontext->endpoint->interface->weight;
-
-    olength = proto_encode(&proto, obuf, sizeof(obuf));
-
-    encrypt_and_write(rcontext->config, rcontext->endpoint->socket, &rcontext->from, rcontext->rkey, obuf, olength);
 }
 
 static
@@ -409,22 +425,6 @@ void read_challenge(struct rcontext* rcontext, const struct proto* proto) {
     } else {
         fprintf(stderr, "Challenge verify failed\n");
     }
-}
-
-static
-void write_accept(struct rcontext* rcontext) {
-    char obuf[1500];
-    ssize_t olength;
-    struct proto proto;
-
-    memset(&proto, 0, sizeof(proto));
-
-    proto.type = PROTO_ACCEPTED;
-    proto.rid.value = rcontext->proto.id.value;
-    proto.rid.length = rcontext->proto.id.length;
-    olength = proto_encode(&proto, obuf, sizeof(obuf));
-
-    encrypt_and_write(rcontext->config, rcontext->endpoint->socket, &rcontext->from, rcontext->rkey, obuf, olength);
 }
 
 static
@@ -457,14 +457,15 @@ void read_confirm(struct rcontext* rcontext, const struct proto* proto) {
     }
     rcontext->session->rkey = cipher_context_create(rcontext->config->cipher, buf);
     write_accept(rcontext);
-    if (rcontext->session->key1 == 0) {
-        write_offer(rcontext->config, rcontext->endpoint, &rcontext->from);
-    }
 }
 
 static
 void read_accept(struct rcontext* rcontext, const struct proto* proto) {
     if (rcontext->session == 0) {
+        return;
+    }
+    if (rcontext->rkey != rcontext->session->key2) {
+        fprintf(stderr, "Wrong key in ACCEPT. Rejecting\n");
         return;
     }
     if (rcontext->session->key1) {
