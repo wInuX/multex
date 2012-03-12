@@ -815,6 +815,7 @@ static struct remote_endpoint* rendpoint_update(struct master_config* config, st
         association_update(config, endpoint, rendpoint);
         endpoint = endpoint->next;
     }
+    return rendpoint;
 }
 
 static
@@ -847,6 +848,7 @@ struct endpoint* endpoint_update(struct master_config* config, struct interface*
         association_update(config, endpoint, rendpoint);
         rendpoint = rendpoint->next;
     }
+    return endpoint;
 }
 
 static
