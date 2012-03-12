@@ -397,6 +397,9 @@ void read_challenge(struct rcontext* rcontext, const struct proto* proto) {
 
     key2 = verify_challenge(rcontext->config, &rcontext->from, &rcontext->endpoint->local, proto->rid.value, proto->rid.length);
     if (key2) {
+        if (rcontext->rendpoint == 0) {
+            rcontext->rendpoint = rendpoint_update(rcontext->config, &rcontext->from, 0);
+        }
         if (rcontext->session == 0) {
             fprintf(stderr, "Challenge accepted. Creating new session\n");
             rcontext->session = session_create(rcontext->config, rcontext->endpoint, rcontext->rendpoint);
