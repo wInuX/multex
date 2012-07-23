@@ -1,0 +1,68 @@
+frame format:
+
+struct frame {
+    byte random_bytes[cipher_size];
+    byte encrypted_data[size - cipher_size - signature_size];
+    byte signature[signature_size];
+};
+
+random_bytes: cipher_size random bytes
+encrypted_bytes: encrypted payload. always multiple to cipher_size
+signature:  hash ([decrypted random bytes] + [ decrypted data ])
+
+
+struct payload {
+    byte type;
+    byte payload_data[payload_size - 1]
+};
+
+if (type == 0)
+    struct payload_data {
+        uint32_t sequence;
+        byte packet[];
+    }
+else
+    payload data is bencoded dictionary
+
+
+    offer            ->
+                     <- challenge
+    confirm          ->
+                     <- accepted
+
+    peers            <> peers
+    data             <> data
+
+
+== offer(1) ==
+id: peer defined bytes
+token: hash of the remote peer public key
+identity:
+    key: peer public key
+    signature: peer public key signed by authority private key
+key: peer offered key encrypted by peer private key
+
+== challenge(2) ==
+id: peer defined bytes
+rid: id from offer request
+token: hash of the peer public key
+identity:
+    key: remote peer public key
+    signature: remote peer public key signed by authority private key
+key: peer offered key encrypted by peer private key
+
+== confirm(3) ==
+id: peer defined bytes
+rid: id from challenge request
+
+== accepted(4) ==
+rid: id from confirm request
+
+== peer ==
+address.ip, address.port, peer public key signature
+address6.ip, address6.port, peer public key signature
+
+
+local peer is allowed to transfer data when accepted packet has been received
+remote peer is allowed to transfer data when confrim has been received
+it is local peer responsibility to handle timeouts (packet loss)

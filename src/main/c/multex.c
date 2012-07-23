@@ -82,21 +82,10 @@ struct remote_endpoint {
     utime_t expiration;    
 };
 
-struct association;
-
-struct association {
-    struct association* next;
-    struct endpoint* endpoint;
-    struct remote_endpoint* rendpoint;
-
-    utime_t lastconnect;
-};
-
 struct session {
     struct session* next;
     struct endpoint* endpoint;
     struct remote_endpoint* rendpoint;
-    struct association* association;
     struct master_config* config;
     int type;
     int priority;
@@ -114,6 +103,7 @@ struct session {
 struct master_config {
     struct event_base * event_base;
     struct event* master_event;
+    struct event* reconnect_event;
     struct event* stdin_event;
     char* trackerhost;
     struct tracker* tracker;
@@ -126,7 +116,6 @@ struct master_config {
     struct endpoint endpoints;
     struct remote_endpoint rendpoints;
     struct session sessions;
-    struct association associations;
 
     struct hwaddress hwlocal;
 
@@ -141,7 +130,6 @@ struct master_config {
 };
 
 static struct endpoint* endpoint_find_by_address(struct master_config* config, const struct udpaddress* address);
-static struct association* association_find_by_address(struct master_config* config, const struct udpaddress* local, const struct udpaddress* remote);
 
 static struct remote_endpoint* rendpoint_add(struct master_config* config, struct udpaddress* address);
 static struct remote_endpoint* rendpoint_find_by_address(struct master_config* config, const struct udpaddress* address);
@@ -151,7 +139,6 @@ static struct session* session_create(struct master_config* config, struct endpo
 
 static struct remote_endpoint* rendpoint_update(struct master_config* config, struct udpaddress* remote, utime_t timeout);
 static struct endpoint* endpoint_update(struct master_config* config, struct interface* interface, struct udpaddress* local);
-static struct association* association_update(struct master_config* config, struct endpoint* endpoint, struct remote_endpoint* rendpoint);
 
 static
 int hwaddress_isbroadcast(const struct hwaddress* addr) {
@@ -523,6 +510,42 @@ void master_callback(evutil_socket_t fd, short type, struct master_config* confi
     fprintf(stderr, "!!no session with hwaddr\n");
 }
 
+void reconnect_callback(evutil_socket_t fd, short type, struct master_config* config) {
+    struct endpoint* endpoint;
+    struct session* session;
+    utime_t unow;
+
+    fprintf(stderr, "reconnecting...\n");
+
+    endpoint = config->endpoints.next;
+    while (endpoint != &config->endpoints) {
+        struct remote_endpoint* rendpoint;
+
+
+        for (rendpoint = config->rendpoints.next; rendpoint != &config->rendpoints; rendpoint = rendpoint->next) {
+            if (session_find_by_address(config, &endpoint->local, &rendpoint->remote) != 0) {
+                continue;
+            }
+            if (endpoint->local.ip.family != rendpoint->remote.ip.family) {
+                continue;
+            }
+            write_offer(config, endpoint, &rendpoint->remote);
+        }
+
+        endpoint = endpoint->next;
+    }
+
+    unow = now();
+    for (session = config->sessions.next; session != &config->sessions; session = session->next) {
+        if (session->last  + 2000 < unow) {
+            //reconnect
+            write_offer(config, session->endpoint, &session->rendpoint->remote);
+        }
+
+    }
+
+}
+
 void stdin_callback(evutil_socket_t fd, short type, struct master_config* config) {
     char ibuf[1500];
     ssize_t ilength;
@@ -563,7 +586,7 @@ void stdin_callback(evutil_socket_t fd, short type, struct master_config* config
 
         fprintf(stderr, "Sessions: \n");
         while (session != &config->sessions) {
-            fprintf(stderr, " %s <=> %s. local: %d. remote: %d\n", udpaddress_string(&session->endpoint->local, buf1), udpaddress_string(&session->rendpoint->remote, buf2), session->key1 != 0, session->key2 != 0);
+            fprintf(stderr, " %s <=> %s. local: %d. remote: %d\n", udpaddress_string(&session->endpoint->local, buf1), udpaddress_string(&session->rendpoint->remote, buf2), session->key1 != 0, session->rkey != 0);
             session = session->next;
         }
     }
@@ -670,7 +693,6 @@ void inotify_callback(struct master_config* config, struct inotification* n) {
             break;
         case INOTIFY_ADDR_ADDED: {
             struct interface* interface = config->interfaces.next;
-            struct association* association;
             struct udpaddress address;
 
             while (interface != &config->interfaces) {
@@ -738,18 +760,6 @@ struct session* session_find_by_address(struct master_config* config, const stru
 }
 
 static
-struct association* association_find_by_address(struct master_config* config, const struct udpaddress* local, const struct udpaddress* remote) {
-    struct association* association = config->associations.next;
-    while (association != config->associations.next) {
-        if (udpaddress_equals(&association->endpoint->local, local) && udpaddress_equals(&association->rendpoint->remote, remote)) {
-            return association;
-        }
-        association = association->next;
-    }
-    return 0;
-}
-
-static
 struct session* session_create(struct master_config* config, struct endpoint* endpoint, struct remote_endpoint* rendpoint) {
     struct session* session = malloc(sizeof(struct session));
 
@@ -806,12 +816,6 @@ static struct remote_endpoint* rendpoint_update(struct master_config* config, st
         rendpoint->next = config->rendpoints.next;
         config->rendpoints.next = rendpoint;
     }
-    /* for each endpoint update association */
-    endpoint = config->endpoints.next;
-    while (endpoint != &config->endpoints) {
-        association_update(config, endpoint, rendpoint);
-        endpoint = endpoint->next;
-    }
     return rendpoint;
 }
 
@@ -839,41 +843,8 @@ struct endpoint* endpoint_update(struct master_config* config, struct interface*
         endpoint->next = config->endpoints.next; 
         config->endpoints.next = endpoint;
     }
-    /* for each rendpoint update association */
-    rendpoint = config->rendpoints.next;
-    while (rendpoint != &config->rendpoints) {
-        association_update(config, endpoint, rendpoint);
-        rendpoint = rendpoint->next;
-    }
     return endpoint;
 }
-
-static
-struct association* association_update(struct master_config* config, struct endpoint* endpoint, struct remote_endpoint* rendpoint) {
-    struct association* association;
-
-    if (endpoint->local.ip.family != rendpoint->remote.ip.family) {
-        return 0;    
-    }
-    if (udpaddress_equals(&endpoint->local, &rendpoint->remote)) {
-        /* do not create self association*/
-        return 0;
-    }
-
-    association = association_find_by_address(config, &endpoint->local, &rendpoint->remote);
-    if (association == 0) {
-        association = malloc(sizeof(struct association));
-        association->endpoint = endpoint;
-        association->rendpoint = rendpoint;
-        association->lastconnect = now();
-        write_offer(config, endpoint, &rendpoint->remote);
-
-        association->next = config->associations.next;
-        config->associations.next = association;
-    }
-    return association;
-}
-
 
 int ENTRY_NAME(int argc, const char* argv[]) {
     const char **p = alloca(argc * sizeof(char*));
@@ -893,7 +864,6 @@ int ENTRY_NAME(int argc, const char* argv[]) {
     config.sessions.next = &config.sessions;
     config.endpoints.next = &config.endpoints;
     config.rendpoints.next = &config.rendpoints;
-    config.associations.next = &config.associations;
     config.port = 1389;
     config.event_base = event_base_new();
     config.tracker = tracker_create(config.event_base, &config, (tracker_callback_t)tracker_callback);
@@ -1027,6 +997,15 @@ int ENTRY_NAME(int argc, const char* argv[]) {
     config.stdin_event = event_new(config.event_base, STDIN_FILENO, EV_READ | EV_PERSIST, (event_callback_fn)stdin_callback, &config);
     event_add(config.stdin_event, 0);
 
+    {
+        struct timeval timeval;
+        timeval.tv_sec = 10;
+        timeval.tv_usec = 0;
+        config.reconnect_event = event_new(config.event_base, -1, EV_PERSIST, (event_callback_fn)reconnect_callback, &config);
+        evtimer_add(config.reconnect_event, &timeval);
+    }
+
+    reconnect_callback(-1, EV_TIMEOUT, &config);
     event_base_dispatch(config.event_base);
 
 

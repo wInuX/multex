@@ -77,7 +77,7 @@ void sighandler(int signal, siginfo_t* info, void *p)
 {
 	fprintf(stderr, "SIGNAL RECEIVED %d\n", signal);
 	printtrace(p);
-	abort();
+	exit(1);
 }
 
 void install_signals(void)
@@ -90,6 +90,7 @@ void install_signals(void)
 	sigemptyset (&action.sa_mask);
 	action.sa_flags = SA_SIGINFO;
 
+	r = sigaction(SIGABRT, &action, 0);
 	r = sigaction(SIGSEGV, &action, 0);
 	r = sigaction(SIGBUS, &action, 0);
 	r = sigaction(SIGFPE, &action, 0);

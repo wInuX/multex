@@ -1,0 +1,157 @@
+struct sequence_history {
+    int offset;
+    int size;
+    int shift;
+    bool data[size];
+};
+
+struct {
+    int cipher_size;
+    int cipher_keysize;
+    int digest_size;
+
+    byte keyX[cipher_size];
+    byte key0[cipher_size];
+
+    key  authority;
+    key  identity;
+    byte[] id;
+
+    int sequence;
+    sequence_history sequence_history;
+} config;
+
+struct {
+    int weight;
+    int priority;
+} interfaces[];
+
+struct {
+    byte id[];
+    int socket;
+} endpoints;
+
+struct {
+    utime_t lastseen;
+    utime_t expiration;
+    byte[] id;
+    key identity;
+    byte lasttoken[][N];
+} rendpoints[];
+
+struct {
+    byte keyR[cipher_size];
+    byte keyL[cipher_size];
+    byte keyLa[cipher_size];
+
+    utime_t lastseen;
+    utime_t lasttracked;
+
+    int priority;
+    int weight;
+    byte hwaddr[6];
+} sessions[];
+
+keyX - peer random secret key
+key0 - network default secret key. Created by hashing authority private key
+key1 - key which is used to decrypt data from remote peer
+key2 - alternative key which is used to decrypt data from remote peer during key update
+rkey - key used to send data to remote peer
+
+id (offer, confirm) and rid (challenge, accepted) contains frame stucture with bencoded data encrypted by keyX. bencoded data is protocol depended
+by always include config.sequence. config.sequence is incremented each time new packet is created.
+
+
+wait loop:
+    - each X second send one offer request to one random endpoint <> rendpoint combination that does not have associated session but have peer identity.
+        - send offer
+            - #key contains random secret key encrypted by remote peer private key
+            - #token contains hash of the remote peer public key
+            - #identity
+                - #identity.key contains peer public key
+                - #identity.signature contains peer public key signed by authority private key
+            - #id contains random secret key (same key used in #key)
+
+    - each X second query request to connected session where lasttracked + timeout < now
+    - remove rendpoints where endpoints.expire < now
+    - remove sessions where lastseen + timeout < now
+
+    - check socket for data for each endpoint
+        - if data
+            - check that key is not key0
+            - check and mark sequence
+            - queue data to tun device
+        - if offer
+            - check that token match our public key
+            - send challenge
+                - create id that include: key, identity.key, identity.signature
+                - token is hash of identity.key
+                - rid is set to id
+        - if challenge
+            - check that token match our public key
+            - check that rid is valid and extract
+            - create session
+            - set session.key2 to #key decrypred from rid
+            - send confirm
+                - set rid to id
+                - create id that includes our key
+        - if confirm
+            - check that rid is valid
+            - extract #key, #identity.key, #identity.signature from #rid
+            - check that #identity.key match #identity.signature. by decrypting #identity.signature by authority public key
+            - create rendpoint
+            - update rendpoint->lastseen
+            - create session
+            - update session->lastseen
+            - set session.rkey to #key from rid decrypted by out private key
+        - if accepted
+            - check that rid is valid
+            - verify remote peer public key
+            - update rendpoint->lastseen
+            - set session.key1 to session.key2. clear session.key2
+
+        - if data update session->lastseen and push to tun
+        - if offer reply with on-fly challenge
+        - if challenge reply with on-fly confirm
+        - if confirm open session. update lastseen. and reply with accepted
+        - if accepted
+
+key exchange:
+    keyL is exchanged every X time (with protocol renegotiation)
+    keyR is exchanged by remote peer (on remote side it is keyL)
+    key0 never exhanged. TODO:
+
+security
+ Alice, Bob, Carol - regual network peers
+ Chuck - mailformed network peer
+ Eve - non network.
+
+ - Eve send random data to Alice from non-network address.
+    Alice try to decrypt message using key0 and discard it because of invalid signature.
+    complexity: 1 decode + 1 signature
+ - Eve send random data to Alice from network address.
+    Alice try to decrypt message using key0, key1, key2 and discard it because of invalid signature.
+    complexity: 3 decode + 3 signature (typical: 2 decode + 2 signature)
+ - Eve send intercepted data packet to Alice from non-network address.
+    Alice try to decrypt message using key0 and discard it because of invalid signature (data never encrypted by key0).
+    complexity: 1 decode + 1 signature
+ - Eve send intercepted data packet to Alice from network address.
+    Alice try to decrypt message using key1, key2 and discard it because sequence already marked.
+    complexity: 2 decode + 2 signature (typical: 1 decode + 1 signature)
+
+ - Alice send offer to Bob. Bob reply with challenge. Eve record offer and try to send it (unmodified) later to Bob from different ip address.
+    Bob will reply with new challenge. but this new challenge is useless because Alice already marked sequence that she received from Bob. Eve could
+    use recorded offer to scan Bob online status until Bob exchange his keyX.
+ - Alice send offer to Bob. Bob reply with challenge. Eve record offer and try to send it (unmodified) later to Carol from different ip address.
+    Carol ignore offer because #token does not match his public key.
+
+ - Alice and Bob begin protocol exchange.offer->challenge->confirm->accept. Eve record challenge/confirm/accept and try to send it (unmodified) later to Alice from different ip address.
+    Alice will ignore challenge/confirm/accept because sequence is already marked
+ - Alice and Bob begin protocol exchange.offer->challenge->confirm->accept. Eve record challenge/confirm/accept and try to send it (unmodified) later to Carol from different ip address.
+    Carol will ignore challenge because id does not match his keyX
+
+ - Chuck begin protocol with Alice prividing random data in #key.
+    Cause significant workload to Alice because of secret key decryption and Chunk public key verification.
+    TODO: Alice could check that she receive confirm from Chunk very frequently
+
+  - Chuck begin protocol with Alice. 

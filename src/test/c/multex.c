@@ -20,6 +20,7 @@ void add_test(Suite *suite, int argc, char** argv, const char* name, TCase* (*te
 
 TCase *test_proto_create_tests();
 TCase *test_cipher_create_tests();
+TCase *test_proto2_create_tests();
 
 int main(int argc, char* argv[]) {
         SRunner *runner;
@@ -32,6 +33,7 @@ int main(int argc, char* argv[]) {
 
         add(test_proto_create_tests);
         add(test_cipher_create_tests);
+        add(test_proto2_create_tests);
 
         runner = srunner_create(multex);
         srunner_run_all(runner, CK_NORMAL);

@@ -1,0 +1,62 @@
+== Goals ==
+releable p2p virtual private network with zero configuration
+
+
+== Security goal ==
+protocol:
+    - no signature (is not possible block protocol by data pattern, port number)
+    - fully encrypted (absolutelly no data (except length) can be extracted without knowledge of the key)
+    - packet reinjection should not cause any problem for peers
+
+outsider (single user)
+    - can't modify network behavious
+    - can't cause DOS attack
+    - can't detect presense of the network on particular peer
+outsider (watcher)
+    - can't modify network behavious
+    - can't cause DOS attack
+    - can detect (with some probability) presense of the network by watching network traffic between peers
+outsider (injector)
+    - can't modify network behavious
+    - can't cause DOS attack
+    - can detect (with some probability) presense of the network by watching network traffic between peers
+    - can't scan network by using intercepted data
+
+insider
+    - can't spoof other traffic
+    - can't see other peer private traffic
+
+
+== Configuration ==
+--authority <path> path to authority public key
+--public-key <path> path to public key
+--private-key <path> path to private key
+
+--interface <name> name of the interface for network connection. Default: all except 'lo'
+  --weight
+  --priority
+--remote <address> static remove address. one should be specified for bootstrap
+
+== Setup ==
+multexconfig --create --authority-key <path> --key0 <path> --peer <ipv4>:<port>:<signature>
+
+
+== Internals ==
+Keys
+ - Authority key (private + public). Private key should be keep in secret place. Peers do not need it. Public key should be abailable to all peers
+ - Peer key (private + public). Present on particular peer. should be signed by Authority private key.
+ - key0. (secret) derivered using Authority public key. Used to establish peer communication
+ - key1 (secret) encrypt session between two peer.
+ - key2 (secret) old key top encrypt session between two peer before new key negotiation is done.
+
+
+network - peers with same Authority public key
+peer - single instance of multex daemon
+interface - one internet conection on peer (peer could be connected to multiple internet providers)
+endpoint - IP address on interface. (provider could give more that one. E.G. ipv4 + ipv6)
+
+
+== Proof of concent simplification ==
+ - linux only
+ - udp only
+ - ipv4 only
